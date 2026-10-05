@@ -2,7 +2,6 @@ package com.harshshah.cinepulse
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,13 +27,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.media3.common.MediaItem
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import com.google.mlkit.vision.face.Face
-import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 
 private val Background = Color(0xFF07080B)
 private val SurfaceDark = Color(0xFF11141A)
@@ -50,33 +51,40 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private suspend fun laptopRequest(host: String, command: String? = null): Boolean = withContext(Dispatchers.IO) {
+    runCatching {
+        val path = if (command == null) "/" else "/command"
+        val c = (URL("http://$host:8765$path").openConnection() as HttpURLConnection).apply {
+            requestMethod = if (command == null) "GET" else "POST"
+            connectTimeout = 1500
+            readTimeout = 1500
+            if (command != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+            }
+        }
+        if (command != null) c.outputStream.use { it.write(JSONObject().put("command", command).toString().toByteArray()) }
+        val ok = c.responseCode in 200..299
+        c.disconnect()
+        ok
+    }.getOrDefault(false)
+}
+
 @Composable
 private fun CinePulseApp() {
-    var showSplash by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(1450)
-        showSplash = false
-    }
+    var splash by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) { delay(1450); splash = false }
     Surface(Modifier.fillMaxSize(), color = Background) {
-        AnimatedVisibility(showSplash, enter = fadeIn(), exit = fadeOut()) { SplashContent() }
-        if (!showSplash) HomeScreen()
+        AnimatedVisibility(splash, enter = fadeIn(), exit = fadeOut()) { SplashContent() }
+        if (!splash) HomeScreen()
     }
 }
 
 @Composable
 private fun SplashContent() {
-    Box(
-        Modifier.fillMaxSize().background(
-            Brush.radialGradient(listOf(Color(0xFF20163A), Background), radius = 900f)
-        ),
-        contentAlignment = Alignment.Center
-    ) {
+    Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF20163A), Background), radius = 900f)), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                Modifier.size(112.dp).clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(Accent, Cyan))),
-                contentAlignment = Alignment.Center
-            ) {
+            Box(Modifier.size(112.dp).clip(CircleShape).background(Brush.linearGradient(listOf(Accent, Cyan))), contentAlignment = Alignment.Center) {
                 Icon(Icons.Rounded.PlayArrow, null, tint = Background, modifier = Modifier.size(58.dp))
             }
             Spacer(Modifier.height(26.dp))
@@ -92,117 +100,116 @@ private fun SplashContent() {
 @Composable
 private fun HomeScreen() {
     val context = LocalContext.current
-    var selectedVideo by remember { mutableStateOf<Uri?>(null) }
-    var cameraGranted by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
-    }
+    val scope = rememberCoroutineScope()
+    var cameraGranted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
     var monitoring by remember { mutableStateOf(false) }
     var autoAttention by remember { mutableStateOf(true) }
     var faces by remember { mutableStateOf<List<Face>>(emptyList()) }
+    var laptopIp by remember { mutableStateOf("") }
+    var connected by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("Connect your Windows laptop") }
+    var connectTick by remember { mutableIntStateOf(0) }
+    var sleepStarted by remember { mutableLongStateOf(0L) }
     var lastPresence by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    var status by remember { mutableStateOf("Ready to watch") }
+    var lastCommand by remember { mutableStateOf("") }
 
-    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        cameraGranted = granted
-        status = if (granted) "Camera monitoring enabled" else "Camera permission is required for smart controls"
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        cameraGranted = it
+        status = if (it) "Camera monitoring enabled" else "Camera permission is required"
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        selectedVideo = uri
-        status = if (uri != null) "Video loaded — ready for smart playback" else "No video selected"
-    }
-
-    val player = remember(selectedVideo) {
-        ExoPlayer.Builder(context).build().also { exo ->
-            selectedVideo?.let { exo.setMediaItem(MediaItem.fromUri(it)); exo.prepare() }
+    LaunchedEffect(connectTick) {
+        if (connectTick > 0 && laptopIp.isNotBlank()) {
+            status = "Connecting…"
+            connected = laptopRequest(laptopIp.trim())
+            status = if (connected) "Connected • YouTube control ready" else "Could not connect • check IP, Wi-Fi and controller"
         }
     }
 
-    DisposableEffect(player) { onDispose { player.release() } }
-
-    LaunchedEffect(faces, monitoring, autoAttention) {
-        if (monitoring && autoAttention) {
-            if (faces.isNotEmpty()) {
-                lastPresence = System.currentTimeMillis()
-                if (!player.isPlaying && player.currentMediaItem != null) player.play()
-                status = "Viewer detected • attention active"
-            } else if (System.currentTimeMillis() - lastPresence > 2500L) {
-                if (player.isPlaying) player.pause()
-                status = "Paused • no viewer detected"
+    suspend fun command(value: String) {
+        if (!connected || laptopIp.isBlank()) {
+            status = "Connect the Windows laptop first"
+            return
+        }
+        if (laptopRequest(laptopIp.trim(), value)) {
+            lastCommand = value
+            status = when (value) {
+                "rewind" -> "Rewound 5 seconds"
+                "forward" -> "Forwarded 5 seconds"
+                "pause" -> "Pause sent to Chrome"
+                else -> "Play sent to Chrome"
             }
+        } else {
+            connected = false
+            status = "Laptop connection lost"
         }
     }
 
-    val progress = remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(player, selectedVideo) {
-        while (true) {
-            if (player.duration > 0) progress.floatValue =
-                (player.currentPosition.toFloat() / player.duration.toFloat()).coerceIn(0f, 1f)
-            kotlinx.coroutines.delay(250)
+    LaunchedEffect(faces, monitoring, autoAttention, connected, laptopIp) {
+        if (!monitoring || !autoAttention || !connected || laptopIp.isBlank()) return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        if (faces.isEmpty()) {
+            if (now - lastPresence > 2500L && lastCommand != "pause") command("pause")
+            sleepStarted = 0L
+            return@LaunchedEffect
+        }
+        lastPresence = now
+        val everyoneClosed = faces.all {
+            (it.leftEyeOpenProbability ?: 1f) < 0.35f && (it.rightEyeOpenProbability ?: 1f) < 0.35f
+        }
+        if (everyoneClosed) {
+            if (sleepStarted == 0L) sleepStarted = now
+            if (now - sleepStarted >= 10_000L && lastCommand != "pause") command("pause")
+        } else {
+            sleepStarted = 0L
+            if (lastCommand == "pause") command("play")
+            else status = "Viewer detected • attention active"
         }
     }
 
-    Column(
-        Modifier.fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Color(0xFF0A0B10), Background)))
-            .navigationBarsPadding().padding(horizontal = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
+    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF0A0B10), Background))).navigationBarsPadding().padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("CinePulse", color = TextPrimary, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-                Text("Gesture-powered movie control", color = TextSecondary, fontSize = 12.sp)
+                Text("Your phone controls the screen", color = TextSecondary, fontSize = 12.sp)
             }
-            IconButton(onClick = {
-                autoAttention = !autoAttention
-                status = if (autoAttention) "Smart attention enabled" else "Smart attention paused"
-            }) {
+            IconButton(onClick = { autoAttention = !autoAttention; status = if (autoAttention) "Smart attention enabled" else "Smart attention paused" }) {
                 Icon(Icons.Rounded.Settings, "Settings", tint = if (autoAttention) Accent else TextSecondary)
             }
         }
 
-        if (selectedVideo == null) {
-            EmptyPlayerCard {
-                picker.launch("video/*")
-            }
-        } else {
-            PlayerCard(player, progress.floatValue, { player.seekBack() }, { player.seekForward() })
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(
-                onClick = {
-                    picker.launch("video/*")
-                },
-                Modifier.weight(1f), shape = RoundedCornerShape(18.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)
-            ) {
-                Icon(Icons.Rounded.Add, null)
-                Spacer(Modifier.width(7.dp))
-                Text(if (selectedVideo == null) "Choose movie" else "Change video", fontWeight = FontWeight.Bold)
-            }
-
-            IconButton(
-                onClick = {
-                    if (cameraGranted) {
-                        monitoring = !monitoring
-                        status = if (monitoring) "Camera monitoring active" else "Monitoring paused"
-                    } else cameraPermission.launch(Manifest.permission.CAMERA)
-                },
-                Modifier.size(54.dp).clip(RoundedCornerShape(18.dp))
-                    .background(if (monitoring) Color(0xFF173A3C) else SurfaceDark)
-            ) {
-                Icon(if (monitoring) Icons.Rounded.Visibility else Icons.Rounded.CameraAlt, "Camera",
-                    tint = if (monitoring) Cyan else TextPrimary)
+        Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark), shape = RoundedCornerShape(22.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Computer, null, tint = Cyan)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Windows + Chrome", color = TextPrimary, fontWeight = FontWeight.Bold)
+                        Text(if (connected) "Connected • YouTube control ready" else "Same Wi-Fi • enter laptop IP", color = TextSecondary, fontSize = 11.sp)
+                    }
+                    Box(Modifier.size(9.dp).clip(CircleShape).background(if (connected) Cyan else Color(0xFF5A6472)))
+                }
+                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Laptop IPv4 address") }, placeholder = { Text("Example: 192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
+                Button(onClick = { connectTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)) {
+                    Icon(if (connected) Icons.Rounded.Link else Icons.Rounded.LinkOff, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (connected) "Reconnect laptop" else "Connect laptop", fontWeight = FontWeight.Bold)
+                }
             }
         }
 
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark.copy(alpha = 0.92f)),
-            shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            ControlButton("Rewind 5s", Icons.Rounded.Replay5, Modifier.weight(1f)) { scope.launch { command("rewind") } }
+            ControlButton("Forward 5s", Icons.Rounded.Forward5, Modifier.weight(1f)) { scope.launch { command("forward") } }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            ControlButton("Pause", Icons.Rounded.Pause, Modifier.weight(1f)) { scope.launch { command("pause") } }
+            ControlButton("Play", Icons.Rounded.PlayArrow, Modifier.weight(1f)) { scope.launch { command("play") } }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = SurfaceDark.copy(alpha = .92f)), shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(9.dp).clip(CircleShape).background(if (monitoring) Cyan else Color(0xFF5A6472)))
                     Spacer(Modifier.width(9.dp))
@@ -210,142 +217,66 @@ private fun HomeScreen() {
                     Spacer(Modifier.weight(1f))
                     Text("${faces.size} viewer" + if (faces.size == 1) "" else "s", color = TextSecondary, fontSize = 12.sp)
                 }
-
-                if (monitoring && cameraGranted) {
-                    CameraAnalyzer(true) { detected -> faces = detected }
+                Button(onClick = {
+                    if (cameraGranted) {
+                        monitoring = !monitoring
+                        lastPresence = System.currentTimeMillis()
+                        status = if (monitoring) "Camera monitoring active" else "Monitoring paused"
+                    } else permission.launch(Manifest.permission.CAMERA)
+                }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = if (monitoring) Color(0xFF173A3C) else Color(0xFF1B1F27))) {
+                    Icon(if (monitoring) Icons.Rounded.Visibility else Icons.Rounded.CameraAlt, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (monitoring) "Monitoring active" else "Start camera monitoring")
                 }
-
+                if (monitoring && cameraGranted) CameraAnalyzer { faces = it }
                 Text("Smart attention", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text(
-                    "Pauses when everyone is absent, then resumes when a viewer returns.",
-                    color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp
-                )
-                Text("Vision is processed on-device • camera frames are not saved",
-                    color = Color(0xFF7F8A9A), fontSize = 11.sp)
+                Text("No viewer for 2.5s → pause. Everyone's eyes closed for 10s → pause. When attention returns → play.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Camera analysis stays on-device • no camera frames are sent to the laptop", color = Color(0xFF7F8A9A), fontSize = 11.sp)
             }
         }
-
-        Text(
-            "Next gesture layer: raise a hand and close it twice to seek. " +
-                "The player and privacy architecture are already isolated for this module.",
-            color = Color(0xFF6E7888), fontSize = 11.sp, lineHeight = 16.sp,
-            modifier = Modifier.padding(horizontal = 3.dp)
-        )
+        Text("Hand gestures will use the same Wi-Fi command channel for 5-second rewind/forward.", color = Color(0xFF6E7888), fontSize = 11.sp, lineHeight = 16.sp)
     }
 }
 
 @Composable
-private fun EmptyPlayerCard(onPick: () -> Unit) {
-    Card(Modifier.fillMaxWidth().aspectRatio(16f / 9f), shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1016))) {
-        Box(Modifier.fillMaxSize().background(
-            Brush.radialGradient(listOf(Color(0xFF211936), Color(0xFF0D1016)), radius = 650f)
-        ), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.size(64.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.07f)),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.PlayArrow, null, tint = Accent, modifier = Modifier.size(34.dp))
-                }
-                Spacer(Modifier.height(14.dp))
-                Text("Your private cinema", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(5.dp))
-                Text("Pick a video to begin", color = TextSecondary, fontSize = 12.sp)
-                Spacer(Modifier.height(16.dp))
-                TextButton(onClick = onPick) { Text("Select video", color = Cyan, fontWeight = FontWeight.Bold) }
-            }
-        }
+private fun ControlButton(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier, onClick: () -> Unit) {
+    Button(onClick = onClick, modifier = modifier, shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = SurfaceDark)) {
+        Icon(icon, null)
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontWeight = FontWeight.SemiBold)
     }
 }
 
 @Composable
-private fun PlayerCard(player: ExoPlayer, progress: Float, onBack: () -> Unit, onForward: () -> Unit) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.Black)) {
-        Column {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        this.player = player
-                        useController = true
-                        setShowNextButton(false)
-                        setShowPreviousButton(false)
-                    }
-                },
-                Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-            )
-            LinearProgressIndicator(
-                progress = { progress }, modifier = Modifier.fillMaxWidth(),
-                color = Accent, trackColor = Color(0xFF272B33)
-            )
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                IconButton(onClick = onBack) { Icon(Icons.Rounded.Replay10, "Rewind", tint = TextPrimary) }
-                IconButton(onClick = { if (player.isPlaying) player.pause() else player.play() }) {
-                    Icon(if (player.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        "Play/Pause", tint = TextPrimary, modifier = Modifier.size(28.dp))
-                }
-                IconButton(onClick = onForward) { Icon(Icons.Rounded.Forward10, "Forward", tint = TextPrimary) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CameraAnalyzer(enabled: Boolean, onFaces: (List<Face>) -> Unit) {
+private fun CameraAnalyzer(onFaces: (List<Face>) -> Unit) {
     val context = LocalContext.current
-
-    DisposableEffect(enabled) {
-        if (!enabled) {
-            onDispose { }
-        } else {
-            val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context)
-            val executor = ContextCompat.getMainExecutor(context)
-            val detector = com.google.mlkit.vision.face.FaceDetection.getClient(
-                com.google.mlkit.vision.face.FaceDetectorOptions.Builder()
-                    .setPerformanceMode(com.google.mlkit.vision.face.FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-                    .setLandmarkMode(com.google.mlkit.vision.face.FaceDetectorOptions.LANDMARK_MODE_ALL)
-                    .setClassificationMode(com.google.mlkit.vision.face.FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                    .enableTracking()
-                    .setMinFaceSize(0.08f)
-                    .build()
-            )
-
-            providerFuture.addListener({
-                runCatching {
-                    val provider = providerFuture.get()
-                    val analysis = androidx.camera.core.ImageAnalysis.Builder()
-                        .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-
-                    analysis.setAnalyzer(executor) { proxy ->
-                        val image = proxy.image
-                        if (image == null) {
-                            proxy.close()
-                            return@setAnalyzer
-                        }
-                        val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(
-                            image, proxy.imageInfo.rotationDegrees
-                        )
-                        detector.process(input)
-                            .addOnSuccessListener { result -> onFaces(result) }
-                            .addOnCompleteListener { proxy.close() }
-                    }
-
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
-                        context as androidx.lifecycle.LifecycleOwner,
-                        androidx.camera.core.CameraSelector.DEFAULT_FRONT_CAMERA,
-                        analysis
-                    )
+    DisposableEffect(Unit) {
+        val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context)
+        val executor = ContextCompat.getMainExecutor(context)
+        val detector = com.google.mlkit.vision.face.FaceDetection.getClient(
+            com.google.mlkit.vision.face.FaceDetectorOptions.Builder()
+                .setPerformanceMode(com.google.mlkit.vision.face.FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setLandmarkMode(com.google.mlkit.vision.face.FaceDetectorOptions.LANDMARK_MODE_ALL)
+                .setClassificationMode(com.google.mlkit.vision.face.FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                .enableTracking().setMinFaceSize(0.08f).build()
+        )
+        providerFuture.addListener({
+            runCatching {
+                val provider = providerFuture.get()
+                val analysis = androidx.camera.core.ImageAnalysis.Builder().setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+                analysis.setAnalyzer(executor) { proxy ->
+                    val image = proxy.image
+                    if (image == null) { proxy.close(); return@setAnalyzer }
+                    val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees)
+                    detector.process(input).addOnSuccessListener { onFaces(it) }.addOnCompleteListener { proxy.close() }
                 }
-            }, executor)
-
-            onDispose {
-                detector.close()
-                providerFuture.addListener({
-                    runCatching { providerFuture.get().unbindAll() }
-                }, executor)
+                provider.unbindAll()
+                provider.bindToLifecycle(context as androidx.lifecycle.LifecycleOwner, androidx.camera.core.CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
             }
+        }, executor)
+        onDispose {
+            detector.close()
+            providerFuture.addListener({ runCatching { providerFuture.get().unbindAll() } }, executor)
         }
     }
 }
