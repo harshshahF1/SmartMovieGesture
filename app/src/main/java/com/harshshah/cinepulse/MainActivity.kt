@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -30,6 +31,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.face.Face
+import com.google.mediapipe.framework.image.MediaImageBuilder
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -135,6 +141,7 @@ private fun HomeScreen() {
     var sleepStarted by remember { mutableLongStateOf(0L) }
     var lastPresence by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastCommand by remember { mutableStateOf("") }
+    var gestureStatus by remember { mutableStateOf("Hand gestures ready") }
 
     val localNetworkPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         localNetworkGranted = it
@@ -283,13 +290,13 @@ private fun HomeScreen() {
                     Spacer(Modifier.width(8.dp))
                     Text(if (monitoring) "Monitoring active" else "Start camera monitoring")
                 }
-                if (monitoring && cameraGranted) CameraAnalyzer { faces = it }
+                if (monitoring && cameraGranted) CameraAnalyzer(onFaces = { faces = it }, onGestureCommand = { value -> scope.launch { command(value) } }, onGestureStatus = { gestureStatus = it })
                 Text("Smart attention", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Text("No viewer for 2.5s → pause. Everyone's eyes closed for 10s → pause. When attention returns → play.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
                 Text("Camera analysis stays on-device • no camera frames are sent to the laptop", color = Color(0xFF7F8A9A), fontSize = 11.sp)
             }
         }
-        Text("Hand gestures will use the same Wi-Fi command channel for 5-second rewind/forward.", color = Color(0xFF6E7888), fontSize = 11.sp, lineHeight = 16.sp)
+        Text("Hand gestures: $gestureStatus", color = Color(0xFF6E7888), fontSize = 11.sp, lineHeight = 16.sp)
     }
 }
 
@@ -303,7 +310,11 @@ private fun ControlButton(label: String, icon: androidx.compose.ui.graphics.vect
 }
 
 @Composable
-private fun CameraAnalyzer(onFaces: (List<Face>) -> Unit) {
+private fun CameraAnalyzer(
+    onFaces: (List<Face>) -> Unit,
+    onGestureCommand: (String) -> Unit,
+    onGestureStatus: (String) -> Unit
+) {
     val context = LocalContext.current
     DisposableEffect(Unit) {
         val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context)
@@ -315,22 +326,100 @@ private fun CameraAnalyzer(onFaces: (List<Face>) -> Unit) {
                 .setClassificationMode(com.google.mlkit.vision.face.FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
                 .enableTracking().setMinFaceSize(0.08f).build()
         )
+        val gestureRecognizer = runCatching {
+            val baseOptions = BaseOptions.builder().setModelAssetPath("gesture_recognizer.task").build()
+            val options = GestureRecognizer.GestureRecognizerOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setNumHands(2)
+                .setMinHandDetectionConfidence(0.55f)
+                .setMinHandPresenceConfidence(0.55f)
+                .setMinTrackingConfidence(0.55f)
+                .setRunningMode(RunningMode.VIDEO)
+                .build()
+            GestureRecognizer.createFromOptions(context, options)
+        }.getOrElse {
+            onGestureStatus("Hand gesture model could not initialize")
+            null
+        }
+
+        var lastGesture = ""
+        var closeCount = 0
+        var firstCloseAt = 0L
+        var cooldownUntil = 0L
+
         providerFuture.addListener({
             runCatching {
                 val provider = providerFuture.get()
-                val analysis = androidx.camera.core.ImageAnalysis.Builder().setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+                val analysis = androidx.camera.core.ImageAnalysis.Builder()
+                    .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
                 analysis.setAnalyzer(executor) { proxy ->
                     val image = proxy.image
-                    if (image == null) { proxy.close(); return@setAnalyzer }
+                    if (image == null) {
+                        proxy.close()
+                        return@setAnalyzer
+                    }
+                    val timestamp = SystemClock.uptimeMillis()
                     val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees)
-                    detector.process(input).addOnSuccessListener { onFaces(it) }.addOnCompleteListener { proxy.close() }
+                    detector.process(input).addOnSuccessListener { onFaces(it) }.addOnCompleteListener { if (gestureRecognizer == null) proxy.close() }
+
+                    if (gestureRecognizer != null) {
+                        runCatching {
+                            val mpImage = MediaImageBuilder(image).build()
+                            val rotation = ImageProcessingOptions.builder()
+                                .setRotationDegrees(proxy.imageInfo.rotationDegrees)
+                                .build()
+                            val result = gestureRecognizer.recognizeForVideo(mpImage, rotation, timestamp)
+                            var currentGesture = ""
+                            var currentSide = ""
+                            for (i in result.gestures().indices) {
+                                val gesture = result.gestures()[i].firstOrNull()?.categoryName() ?: continue
+                                val side = result.handedness().getOrNull(i)?.firstOrNull()?.categoryName() ?: continue
+                                if (gesture == "Closed_Fist") {
+                                    currentGesture = gesture
+                                    currentSide = side
+                                    break
+                                }
+                            }
+                            val now = System.currentTimeMillis()
+                            if (currentGesture == "Closed_Fist" && lastGesture != "Closed_Fist" && now >= cooldownUntil) {
+                                if (firstCloseAt == 0L || now - firstCloseAt > 3000L) {
+                                    firstCloseAt = now
+                                    closeCount = 1
+                                } else {
+                                    closeCount++
+                                }
+                                if (closeCount >= 2) {
+                                    val command = if (currentSide == "Left") "rewind" else "forward"
+                                    onGestureCommand(command)
+                                    onGestureStatus(if (command == "rewind") "Left fist double-close → rewind 5s" else "Right fist double-close → forward 5s")
+                                    closeCount = 0
+                                    firstCloseAt = 0L
+                                    cooldownUntil = now + 1500L
+                                } else {
+                                    onGestureStatus("${currentSide} fist detected • open, then close again")
+                                }
+                            }
+                            if (currentGesture.isEmpty() && lastGesture == "Closed_Fist") onGestureStatus("Hand open • gesture armed")
+                            if (firstCloseAt != 0L && now - firstCloseAt > 3000L) {
+                                closeCount = 0
+                                firstCloseAt = 0L
+                            }
+                            lastGesture = currentGesture
+                        }.onFailure {
+                            onGestureStatus("Hand gesture processing unavailable")
+                        }
+                    }
+                    if (gestureRecognizer != null) proxy.close()
                 }
                 provider.unbindAll()
                 provider.bindToLifecycle(context as androidx.lifecycle.LifecycleOwner, androidx.camera.core.CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
             }
         }, executor)
+
         onDispose {
             detector.close()
+            gestureRecognizer?.close()
             providerFuture.addListener({ runCatching { providerFuture.get().unbindAll() } }, executor)
         }
     }

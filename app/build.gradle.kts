@@ -7,7 +7,7 @@ android {
     compileSdk = 37
     defaultConfig {
         applicationId = "com.harshshah.cinepulse"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
@@ -41,4 +41,5 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.11.1")
     implementation("androidx.media3:media3-common:1.11.1")
     implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("com.google.mediapipe:tasks-vision:0.10.32")
 }
