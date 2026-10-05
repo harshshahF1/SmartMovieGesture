@@ -1,32 +1,27 @@
 # CinePulse
 
-CinePulse is a phone-based smart viewing controller. The Android app watches viewers locally and sends playback commands over the same Wi-Fi network to a Windows laptop running Chrome.
+CinePulse is a phone-based smart viewing controller. The Android app watches viewers locally and sends playback commands over a Bluetooth Personal Area Network (Bluetooth PAN) to a Windows laptop running Chrome.
 
 ## Current architecture
 
 ```
 Android phone (CinePulse)
-  Camera + face/eye attention
+  Camera + face/eye attention + gestures
           |
-          | Wi-Fi
+          | Bluetooth PAN
           v
 Windows laptop (CinePulse Controller)
           |
           v
 Chrome + YouTube
-          |
-         HDMI
-          |
-          v
-TV
 ```
 
-If the laptop is connected to a TV by HDMI, the TV automatically shows the controlled YouTube playback.
+The phone and laptop do not need to share Wi-Fi. Windows must be paired with the phone and connected to the phone's Bluetooth Personal Area Network.
 
 ## Android features
 
 - Premium responsive Jetpack Compose UI.
-- Connect to a Windows laptop by IPv4 address.
+- Connect to a Windows laptop over Bluetooth PAN, with automatic discovery or optional Bluetooth-PAN IPv4 address.
 - Play, pause, rewind 5 seconds and forward 5 seconds commands.
 - Front-camera, on-device multi-face tracking.
 - If nobody is detected for 2.5 seconds, send pause.
@@ -42,7 +37,7 @@ The Windows controller is a small Python HTTP server. The Chrome extension polls
 
 ## Security
 
-Use this only on a trusted private LAN. The controller listens on port 8765 and should not be exposed to the public internet.
+The controller listens on port 8765 and is intended for the private Bluetooth PAN between the phone and Windows laptop. Camera frames remain on the phone.
 
 ## Build
 
