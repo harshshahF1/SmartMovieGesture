@@ -3,9 +3,6 @@ package com.harshshah.cinepulse
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.os.Build
 import android.os.SystemClock
@@ -47,9 +44,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 
 private val Background = Color(0xFF07080B)
 private val SurfaceDark = Color(0xFF11141A)
@@ -65,59 +59,38 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private const val UDP_PORT = 8766
+private const val DEFAULT_RELAY_URL = "https://YOUR-CLOUDFLARE-WORKER.workers.dev"
 
-private fun bluetoothNetwork(context: Context): Network? {
-    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    return cm.allNetworks.firstOrNull { network ->
-        cm.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) == true
-    }
-}
-
-private suspend fun discoverLaptop(context: Context): String? = withContext(Dispatchers.IO) {
+private suspend fun relayRequest(baseUrl: String, path: String, method: String, payload: JSONObject? = null): JSONObject? = withContext(Dispatchers.IO) {
     runCatching {
-        val network = bluetoothNetwork(context) ?: return@withContext null
-        DatagramSocket().use { socket ->
-            network.bindSocket(socket)
-            socket.broadcast = true
-            socket.soTimeout = 2500
-            val bytes = "CINEPULSE_DISCOVER".toByteArray(Charsets.UTF_8)
-            socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), UDP_PORT))
-            val buffer = ByteArray(512)
-            val reply = DatagramPacket(buffer, buffer.size)
-            socket.receive(reply)
-            if (String(reply.data, 0, reply.length, Charsets.UTF_8).startsWith("CINEPULSE|")) reply.address.hostAddress else null
+        val base = baseUrl.trim().removeSuffix("/")
+        require(base.startsWith("https://")) { "Relay must use HTTPS" }
+        val connection = (URL(base + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 5000
+            readTimeout = 5000
+            useCaches = false
+            doInput = true
+            setRequestProperty("Accept", "application/json")
+            if (payload != null) { doOutput = true; setRequestProperty("Content-Type", "application/json") }
         }
+        try {
+            if (payload != null) connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
+            if (code !in 200..299) throw IllegalStateException(text)
+            JSONObject(text)
+        } finally { connection.disconnect() }
     }.getOrNull()
 }
 
-private suspend fun laptopRequest(context: Context, host: String, command: String? = null): Boolean = withContext(Dispatchers.IO) {
-    runCatching {
-        val network = bluetoothNetwork(context) ?: return@withContext false
-        val url = if (command == null) "http://$host:8765/ping" else "http://$host:8765/command"
-        val connection = (network.openConnection(URL(url)) as HttpURLConnection).apply {
-            requestMethod = if (command == null) "GET" else "POST"
-            connectTimeout = 2500
-            readTimeout = 2500
-            useCaches = false
-            doInput = true
-            if (command != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-            }
-        }
-        try {
-            if (command != null) {
-                val body = JSONObject().put("command", command).toString()
-                connection.outputStream.use { out -> out.write(body.toByteArray(Charsets.UTF_8)) }
-            }
-            connection.responseCode in 200..299
-        } finally {
-            connection.disconnect()
-        }
-    }.getOrDefault(false)
-}
+private suspend fun createSession(relayUrl: String): JSONObject? = relayRequest(relayUrl, "/v1/session", "POST")
 
+private suspend fun sendRelayCommand(relayUrl: String, code: String, token: String, command: String): Boolean {
+    val payload = JSONObject().put("code", code).put("token", token).put("command", command)
+    return relayRequest(relayUrl, "/v1/command", "POST", payload)?.optBoolean("ok", false) == true
+}
 @Composable
 private fun CinePulseApp() {
     var splash by remember { mutableStateOf(true) }
@@ -153,11 +126,12 @@ private fun HomeScreen() {
     var monitoring by remember { mutableStateOf(false) }
     var autoAttention by remember { mutableStateOf(true) }
     var faces by remember { mutableStateOf<List<Face>>(emptyList()) }
-    var laptopIp by remember { mutableStateOf("") }
+    var relayUrl by remember { mutableStateOf(DEFAULT_RELAY_URL) }
+    var sessionCode by remember { mutableStateOf("") }
+    var phoneToken by remember { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Connect your Windows laptop") }
-    var connectTick by remember { mutableIntStateOf(0) }
-    var discoverTick by remember { mutableIntStateOf(0) }
+    var status by remember { mutableStateOf("Create a secure relay session") }
+    var sessionTick by remember { mutableIntStateOf(0) }
     var sleepStarted by remember { mutableLongStateOf(0L) }
     var lastPresence by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastCommand by remember { mutableStateOf("") }
@@ -168,46 +142,27 @@ private fun HomeScreen() {
         status = if (it) "Camera monitoring enabled" else "Camera permission is required"
     }
 
-    LaunchedEffect(discoverTick) {
-        if (discoverTick > 0) {
-            status = "Searching over Bluetooth…"
-            val found = discoverLaptop(context)
-            if (found != null) {
-                laptopIp = found
-                connected = laptopRequest(context, found)
-                status = if (connected) "Laptop found • Bluetooth control ready" else "Laptop found but connection failed"
-            } else status = "Bluetooth network not found • enable Bluetooth tethering and connect Windows"
-        }
-    }
-
-    LaunchedEffect(connectTick) {
-        if (connectTick > 0 && laptopIp.isNotBlank()) {
-            status = "Connecting over Bluetooth…"
-            connected = laptopRequest(context, laptopIp.trim())
-            status = if (connected) "Connected • Bluetooth control ready" else "Could not connect • check Bluetooth PAN and controller"
+    LaunchedEffect(sessionTick) {
+        if (sessionTick > 0) {
+            status = "Creating encrypted relay session…"
+            val result = createSession(relayUrl)
+            if (result != null) {
+                sessionCode = result.optString("code")
+                phoneToken = result.optString("token")
+                connected = sessionCode.isNotBlank() && phoneToken.isNotBlank()
+                status = if (connected) "Secure session created • give the code to Windows" else "Relay returned an invalid session"
+            } else { connected = false; status = "Relay unavailable • check the HTTPS relay URL" }
         }
     }
 
     suspend fun command(value: String) {
-        if (!connected || laptopIp.isBlank()) {
-            status = "Connect the Windows laptop first"
-            return
-        }
-        if (laptopRequest(context, laptopIp.trim(), value)) {
+        if (!connected || sessionCode.isBlank() || phoneToken.isBlank()) { status = "Create the secure relay session first"; return }
+        if (sendRelayCommand(relayUrl, sessionCode, phoneToken, value)) {
             lastCommand = value
-            status = when (value) {
-                "rewind" -> "Rewound 5 seconds"
-                "forward" -> "Forwarded 5 seconds"
-                "pause" -> "Pause sent to Chrome"
-                else -> "Play sent to Chrome"
-            }
-        } else {
-            connected = false
-            status = "Laptop connection lost"
-        }
+            status = when (value) { "rewind" -> "Rewound 5 seconds"; "forward" -> "Forwarded 5 seconds"; "pause" -> "Pause sent through secure relay"; else -> "Play sent through secure relay" }
+        } else status = "Relay command failed"
     }
-
-    LaunchedEffect(faces, monitoring, autoAttention, connected, laptopIp) {
+    LaunchedEffect(faces, monitoring, autoAttention, connected, sessionCode) {
         if (!monitoring || !autoAttention || !connected || laptopIp.isBlank()) return@LaunchedEffect
         val now = System.currentTimeMillis()
         if (faces.isEmpty()) {
@@ -244,24 +199,21 @@ private fun HomeScreen() {
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark), shape = RoundedCornerShape(22.dp)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Computer, null, tint = Cyan)
-                    Spacer(Modifier.width(10.dp))
+                    Icon(Icons.Rounded.Cloud, null, tint = Cyan); Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Windows + Chrome", color = TextPrimary, fontWeight = FontWeight.Bold)
-                        Text(if (connected) "Connected • YouTube control ready" else "Bluetooth PAN • auto-discover or enter laptop IP", color = TextSecondary, fontSize = 11.sp)
+                        Text("Secure Cloud Relay", color = TextPrimary, fontWeight = FontWeight.Bold)
+                        Text(if (connected) "Session active • command-only relay" else "HTTPS command relay • no camera/audio/video", color = TextSecondary, fontSize = 11.sp)
                     }
                     Box(Modifier.size(9.dp).clip(CircleShape).background(if (connected) Cyan else Color(0xFF5A6472)))
                 }
-                Button(onClick = { discoverTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B1F27), contentColor = TextPrimary)) {
-                    Icon(Icons.Rounded.WifiFind, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Find laptop over Bluetooth", fontWeight = FontWeight.Bold)
+                OutlinedTextField(value = relayUrl, onValueChange = { relayUrl = it; connected = false }, label = { Text("Your HTTPS relay URL") }, placeholder = { Text("https://your-worker.workers.dev") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
+                Button(onClick = { sessionTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)) {
+                    Icon(Icons.Rounded.Lock, null); Spacer(Modifier.width(8.dp)); Text(if (connected) "Create new secure session" else "Create secure session", fontWeight = FontWeight.Bold)
                 }
-                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Bluetooth PAN laptop IP (optional)") }, placeholder = { Text("Example: 192.168.44.2") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
-                Button(onClick = { connectTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)) {
-                    Icon(if (connected) Icons.Rounded.Link else Icons.Rounded.LinkOff, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (connected) "Reconnect laptop" else "Connect laptop", fontWeight = FontWeight.Bold)
+                if (sessionCode.isNotBlank()) {
+                    Text("PAIRING CODE", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text(sessionCode, color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
+                    Text("Enter this code in the Windows CinePulse Controller. The relay carries commands only.", color = TextSecondary, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
         }
@@ -296,11 +248,11 @@ private fun HomeScreen() {
                     Text(if (monitoring) "Monitoring active" else "Start camera monitoring")
                 }
                 if (monitoring && cameraGranted) CameraAnalyzer(onFaces = { faces = it }, onGestureCommand = { value -> scope.launch { command(value) } }, onGestureStatus = { gestureStatus = it })
-                Text("Bluetooth connection", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text("Cloud relay privacy", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Text("Pair the phone with Windows, enable Bluetooth tethering on the phone, connect Windows to the phone's Bluetooth Personal Area Network, then tap Find laptop over Bluetooth.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
                 Text("Smart attention", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Text("No viewer for 2.5s → pause. Everyone's eyes closed for 10s → pause. When attention returns → play.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
-                Text("Camera analysis stays on-device • no camera frames are sent to the laptop", color = Color(0xFF7F8A9A), fontSize = 11.sp)
+                Text("On-device AI • no camera/audio/video upload • HTTPS command-only relay", color = Color(0xFF7F8A9A), fontSize = 11.sp)
             }
         }
         Text("Hand gestures: $gestureStatus", color = Color(0xFF6E7888), fontSize = 11.sp, lineHeight = 16.sp)
