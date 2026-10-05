@@ -87,14 +87,16 @@ export default {
       });
     }
 
-    if (url.pathname === "/v1/poll" && request.method === "GET") {
-      const code = (url.searchParams.get("code") || "").toUpperCase();
-      const token = url.searchParams.get("token") || "";
-      if (!code || !token) return json({ error: "missing credentials" }, 400);
+    if (url.pathname === "/v1/poll" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      if (!body || typeof body.code !== "string" || typeof body.token !== "string") return json({ error: "missing credentials" }, 400);
+      const code = body.code.toUpperCase();
       const id = env.CINEPULSE_SESSIONS.idFromName(code);
       const stub = env.CINEPULSE_SESSIONS.get(id);
       return stub.fetch("https://relay/poll", {
-        headers: { "x-token-hash": await hash(token) }
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code, token: body.token })
       });
     }
 
