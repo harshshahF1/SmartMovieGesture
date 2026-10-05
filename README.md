@@ -1,51 +1,38 @@
 # CinePulse
 
-CinePulse is a phone-based smart viewing controller. The Android app watches viewers locally and sends playback commands over a Bluetooth Personal Area Network (Bluetooth PAN) to a Windows laptop running Chrome.
+CinePulse is a phone-based smart viewing controller for Chrome + YouTube. The Android phone performs face/eye attention analysis and hand-gesture recognition locally. Only playback commands are sent through an HTTPS cloud relay to the Windows controller.
 
-## Current architecture
+## Architecture
 
-```
-Android phone (CinePulse)
-  Camera + face/eye attention + gestures
-          |
-          | Bluetooth PAN
-          v
-Windows laptop (CinePulse Controller)
-          |
-          v
-Chrome + YouTube
-```
+Android phone / CinePulse -> HTTPS command-only relay -> Windows CinePulse Controller -> Chrome + YouTube
 
-The phone and laptop do not need to share Wi-Fi. Windows must be paired with the phone and connected to the phone's Bluetooth Personal Area Network.
+## Privacy boundary
 
-## Android features
+- Camera frames never leave the Android device.
+- Face images, face measurements and eye-state data never leave the Android device.
+- Microphone/audio is not used or uploaded by CinePulse.
+- Video, screenshots and YouTube content are never uploaded to the relay.
+- The relay carries only play, pause, rewind and forward commands plus temporary session routing data.
+- The relay stores only short-lived session state needed to route commands; it has no endpoint for camera/audio/video uploads.
 
-- Premium responsive Jetpack Compose UI.
-- Connect to a Windows laptop over Bluetooth PAN, with automatic discovery or optional Bluetooth-PAN IPv4 address.
-- Play, pause, rewind 5 seconds and forward 5 seconds commands.
-- Front-camera, on-device multi-face tracking.
-- If nobody is detected for 2.5 seconds, send pause.
-- If all detected viewers keep both eyes closed for 10 seconds, send pause.
-- When attention returns, send play.
-- Camera frames are not sent to the laptop.
+The cloud infrastructure can still see ordinary network metadata such as connection source information. The privacy guarantee here is that CinePulse does not send personal media, biometric data, audio or video to the relay.
 
-## Windows + Chrome setup
+## Cloud relay
 
-See [windows/README.md](windows/README.md).
+`relay/worker.js` is a Cloudflare Worker using a Durable Object. Deploy it to a Cloudflare account you control. The Android app creates a temporary pairing code; enter that code in the Windows controller. The controller then polls the relay for commands.
 
-The Windows controller is a small Python HTTP server. The Chrome extension polls it locally and controls the YouTube video element.
-
-## Security
-
-The controller listens on port 8765 and is intended for the private Bluetooth PAN between the phone and Windows laptop. Camera frames remain on the phone.
+No Tailscale, Bluetooth PAN, Wi-Fi discovery, public Windows port, camera upload, audio upload or video upload is required.
 
 ## Build
 
 GitHub Actions builds the Android debug APK on pushes to `main`.
 
-## Stack
+## Features
 
-Kotlin, Jetpack Compose Material 3, CameraX, Google ML Kit Face Detection, AndroidX Media3 dependencies, Python standard-library HTTP server, and a Chrome Manifest V3 extension.
-
-
-Build verification trigger: Gradle 9.1 / CinePulse APK
+- Play / pause / rewind 5 seconds / forward 5 seconds.
+- Multi-viewer face and eye attention detection on-device.
+- Nobody detected for 2.5 seconds -> pause.
+- Everyone's eyes closed for 10 seconds -> pause.
+- Attention returns -> play.
+- Left fist gesture -> rewind 5 seconds.
+- Right fist gesture -> forward 5 seconds.
