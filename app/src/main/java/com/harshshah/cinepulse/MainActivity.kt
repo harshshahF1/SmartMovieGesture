@@ -369,7 +369,7 @@ private fun CameraAnalyzer(
                             val rotation = ImageProcessingOptions.builder()
                                 .setRotationDegrees(proxy.imageInfo.rotationDegrees)
                                 .build()
-                            val result = gestureRecognizer.recognizeForVideo(mpImage, timestamp, rotation)
+                            val result = gestureRecognizer.recognizeForVideo(mpImage, rotation, timestamp)
                             var currentGesture = ""
                             var currentSide = ""
                             for (i in result.gestures().indices) {
