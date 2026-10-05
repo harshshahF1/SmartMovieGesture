@@ -148,8 +148,14 @@ export class CinePulseSession {
       return json({ ok: true });
     }
 
-    if (request.method === "GET" && path === "/poll") {
-      const tokenHash = request.headers.get("x-token-hash");
+    if ((request.method === "GET" || request.method === "POST") && path === "/poll") {
+      let tokenHash = request.headers.get("x-token-hash") || "";
+      if (request.method === "POST") {
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body.code !== "string" || typeof body.token !== "string") return json({ error: "missing credentials" }, 400);
+        if (body.code.toUpperCase() !== session.code) return json({ error: "unauthorized" }, 401);
+        tokenHash = await hash(body.token);
+      }
       if (tokenHash !== session.controllerTokenHash) return json({ error: "unauthorized" }, 401);
       const commands = session.commands || [];
       await this.state.storage.put("session", { ...session, commands: [] });
