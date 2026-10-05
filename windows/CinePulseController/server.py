@@ -44,8 +44,8 @@ def relay_poll_loop():
     while True:
         if RELAY_TOKEN:
             try:
-                path = "/v1/poll?code=" + urllib.parse.quote(PAIRING_CODE) + "&token=" + urllib.parse.quote(RELAY_TOKEN)
-                req = urllib.request.Request(RELAY_URL + path, headers={"Accept":"application/json"})
+                body = json.dumps({"code": PAIRING_CODE, "token": RELAY_TOKEN}).encode()
+                req = urllib.request.Request(RELAY_URL + "/v1/poll", data=body, method="POST", headers={"Content-Type":"application/json","Accept":"application/json"})
                 with urllib.request.urlopen(req, timeout=8) as response:
                     result = json.loads(response.read().decode())
                 for command in result.get("commands", []):
