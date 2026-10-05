@@ -27,6 +27,14 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      - name: Download gesture recognition model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fL --retry 3 --retry-delay 2 \
+            https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task \
+            -o app/src/main/assets/gesture_recognizer.task
+          test -s app/src/main/assets/gesture_recognizer.task
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
