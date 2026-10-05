@@ -1,0 +1,7 @@
+<resources>
+    <color name="cine_black">#07080B</color>
+    <color name="cine_surface">#11141A</color>
+    <color name="cine_accent">#A78BFA</color>
+    <color name="cine_accent_2">#22D3EE</color>
+    <color name="cine_white">#F8FAFC</color>
+</resources>
