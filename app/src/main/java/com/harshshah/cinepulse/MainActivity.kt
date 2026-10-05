@@ -129,7 +129,9 @@ private fun HomeScreen() {
     var laptopIp by remember { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Connect your Windows laptop") }
-    var connectTick by remember { mutableIntStateOf(0) }\n    var discoverTick by remember { mutableIntStateOf(0) }\n    var localNetworkGranted by remember { mutableStateOf(Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(context, LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED) }
+    var connectTick by remember { mutableIntStateOf(0) }
+    var discoverTick by remember { mutableIntStateOf(0) }
+    var localNetworkGranted by remember { mutableStateOf(Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(context, LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED) }
     var sleepStarted by remember { mutableLongStateOf(0L) }
     var lastPresence by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastCommand by remember { mutableStateOf("") }
@@ -166,7 +168,8 @@ private fun HomeScreen() {
     }
 
     LaunchedEffect(connectTick) {
-        if (connectTick > 0 && laptopIp.isNotBlank()) {\n            if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) { status = "Allow Local network access first"; localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION); return@LaunchedEffect }
+        if (connectTick > 0 && laptopIp.isNotBlank()) {
+            if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) { status = "Allow Local network access first"; localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION); return@LaunchedEffect }
             status = "Connecting…"
             connected = laptopRequest(laptopIp.trim())
             status = if (connected) "Connected • YouTube control ready" else "Could not connect • check IP, Wi-Fi and controller"
@@ -237,7 +240,12 @@ private fun HomeScreen() {
                     }
                     Box(Modifier.size(9.dp).clip(CircleShape).background(if (connected) Cyan else Color(0xFF5A6472)))
                 }
-                Button(onClick = { discoverTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B1F27), contentColor = TextPrimary)) {\n                    Icon(Icons.Rounded.WifiFind, null)\n                    Spacer(Modifier.width(8.dp))\n                    Text("Auto-discover laptop", fontWeight = FontWeight.Bold)\n                }\n                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Laptop IPv4 address") }, placeholder = { Text("Example: 192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
+                Button(onClick = { discoverTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B1F27), contentColor = TextPrimary)) {
+                    Icon(Icons.Rounded.WifiFind, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Auto-discover laptop", fontWeight = FontWeight.Bold)
+                }
+                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Laptop IPv4 address") }, placeholder = { Text("Example: 192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
                 Button(onClick = { connectTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)) {
                     Icon(if (connected) Icons.Rounded.Link else Icons.Rounded.LinkOff, null)
                     Spacer(Modifier.width(8.dp))
