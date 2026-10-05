@@ -163,7 +163,7 @@ private fun HomeScreen() {
         } else status = "Relay command failed"
     }
     LaunchedEffect(faces, monitoring, autoAttention, connected, sessionCode) {
-        if (!monitoring || !autoAttention || !connected || laptopIp.isBlank()) return@LaunchedEffect
+        if (!monitoring || !autoAttention || !connected || sessionCode.isBlank()) return@LaunchedEffect
         val now = System.currentTimeMillis()
         if (faces.isEmpty()) {
             if (now - lastPresence > 2500L && lastCommand != "pause") command("pause")
@@ -249,7 +249,7 @@ private fun HomeScreen() {
                 }
                 if (monitoring && cameraGranted) CameraAnalyzer(onFaces = { faces = it }, onGestureCommand = { value -> scope.launch { command(value) } }, onGestureStatus = { gestureStatus = it })
                 Text("Cloud relay privacy", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text("Pair the phone with Windows, enable Bluetooth tethering on the phone, connect Windows to the phone's Bluetooth Personal Area Network, then tap Find laptop over Bluetooth.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Camera frames, face images, eye measurements, microphone audio, video and screen content stay on the phone. The relay receives only playback commands and temporary session routing data.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
                 Text("Smart attention", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Text("No viewer for 2.5s → pause. Everyone's eyes closed for 10s → pause. When attention returns → play.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
                 Text("On-device AI • no camera/audio/video upload • HTTPS command-only relay", color = Color(0xFF7F8A9A), fontSize = 11.sp)
