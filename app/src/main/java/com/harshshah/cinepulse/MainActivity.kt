@@ -107,7 +107,7 @@ private fun HomeScreen() {
         status = if (granted) "Camera monitoring enabled" else "Camera permission is required for smart controls"
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         selectedVideo = uri
         status = if (uri != null) "Video loaded — ready for smart playback" else "No video selected"
     }
@@ -164,7 +164,7 @@ private fun HomeScreen() {
 
         if (selectedVideo == null) {
             EmptyPlayerCard {
-                picker.launch(ActivityResultContracts.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                picker.launch("video/*")
             }
         } else {
             PlayerCard(player, progress.floatValue, { player.seekBack() }, { player.seekForward() })
@@ -173,7 +173,7 @@ private fun HomeScreen() {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(
                 onClick = {
-                    picker.launch(ActivityResultContracts.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                    picker.launch("video/*")
                 },
                 Modifier.weight(1f), shape = RoundedCornerShape(18.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)
