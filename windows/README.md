@@ -1,27 +1,22 @@
 # CinePulse Windows + Chrome controller
 
-This companion lets the CinePulse Android app control a YouTube video playing in Chrome on Windows.
+The Windows companion controls YouTube in Chrome while the phone communicates through an HTTPS cloud relay. No Bluetooth PAN, Wi-Fi discovery, Tailscale or inbound Windows port is required for phone-to-PC control.
 
 ## Setup
 
-1. Keep the Windows laptop and Android phone on the same Wi-Fi network.
-2. Install Python 3 on Windows.
-3. Open `windows/CinePulseController` and run `start_controller.bat`.
-4. Find the laptop's IPv4 address with `ipconfig`. Example: `192.168.1.20`.
-5. In Chrome open `chrome://extensions`.
-6. Enable **Developer mode**.
-7. Choose **Load unpacked** and select `windows/chrome-extension`.
-8. Open YouTube in Chrome and start a video.
-9. Open CinePulse on Android, enter the laptop IPv4 address and port `8765`, then connect.
+1. Deploy `relay/worker.js` using `relay/wrangler.toml` to a Cloudflare account you control.
+2. Open CinePulse and enter the relay HTTPS URL.
+3. Tap **Create secure session**. The phone displays a temporary pairing code.
+4. Run `start_controller.bat` on Windows.
+5. Enter the same relay URL and pairing code when prompted.
+6. In Chrome open `chrome://extensions`, enable Developer mode, and choose **Load unpacked** for `windows/chrome-extension`.
+7. Open YouTube and start a video.
+8. Use CinePulse controls, attention detection or hand gestures.
 
-## Firewall
+## Network
 
-If Windows Firewall asks about Python, allow it on **Private networks**. Do not expose port 8765 to the public internet.
+The Windows controller makes outbound HTTPS requests to the relay. Its local `127.0.0.1:8765` bridge is only for the Chrome extension on the same PC.
 
-## How it works
+## Privacy
 
-Android sends play/pause/rewind/forward commands to the Windows controller over the local network. The Chrome extension polls the controller and applies those commands to the active YouTube video element. HDMI is transparent: if the laptop is connected to a TV, the TV shows the laptop's controlled playback.
-
-## Safety/privacy
-
-The controller is intended for the local LAN only. No video is transferred through CinePulse. The Android camera feed is not sent to the laptop.
+The Windows controller receives playback commands only. It never receives Android camera frames, face images, eye measurements, microphone audio, video or screen content.
