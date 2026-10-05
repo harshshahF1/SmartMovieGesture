@@ -1,64 +1,76 @@
 import json
+import os
 import threading
-import socket
+import time
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOST = "0.0.0.0"
 PORT = 8765
-UDP_PORT = 8766
+RELAY_URL = os.environ.get("CINEPULSE_RELAY_URL", "").rstrip("/")
+PAIRING_CODE = os.environ.get("CINEPULSE_PAIRING_CODE", "").strip()
+RELAY_TOKEN = None
 commands = []
 lock = threading.Lock()
+VALID = {"play", "pause", "rewind", "forward"}
 
 def queue_command(command):
-    if command in {"play", "pause", "rewind", "forward"}:
+    if command in VALID:
         with lock:
             commands.append(command)
         return True
     return False
 
-def udp_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((HOST, UDP_PORT))
-    print(f"UDP control/discovery on 0.0.0.0:{UDP_PORT}")
+def register_controller():
+    global RELAY_TOKEN
+    if not RELAY_URL.startswith("https://") or not PAIRING_CODE:
+        print("Cloud relay not configured. Set the relay URL and pairing code.")
+        return False
+    try:
+        body = json.dumps({"code": PAIRING_CODE, "role": "controller"}).encode()
+        req = urllib.request.Request(RELAY_URL + "/v1/register", data=body, method="POST", headers={"Content-Type":"application/json","Accept":"application/json"})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            result = json.loads(response.read().decode())
+        RELAY_TOKEN = result.get("token")
+        if RELAY_TOKEN:
+            print("Cloud relay connected. Only playback commands are relayed.")
+            return True
+    except Exception as exc:
+        print(f"Relay registration failed: {exc}")
+    return False
+
+def relay_poll_loop():
     while True:
-        try:
-            data, addr = sock.recvfrom(2048)
-            message = data.decode("utf-8", errors="ignore").strip()
-            if message == "CINEPULSE_DISCOVER":
-                reply = f"CINEPULSE|{socket.gethostname()}|{addr[0]}".encode()
-                sock.sendto(reply, addr)
-            elif message == "CINEPULSE_PING":
-                sock.sendto(b"CINEPULSE_OK", addr)
-            elif queue_command(message):
-                sock.sendto(b"CINEPULSE_OK", addr)
-            else:
-                sock.sendto(b"CINEPULSE_ERROR", addr)
-        except Exception as exc:
-            print(f"UDP error: {exc}")
+        if RELAY_TOKEN:
+            try:
+                path = "/v1/poll?code=" + urllib.parse.quote(PAIRING_CODE) + "&token=" + urllib.parse.quote(RELAY_TOKEN)
+                req = urllib.request.Request(RELAY_URL + path, headers={"Accept":"application/json"})
+                with urllib.request.urlopen(req, timeout=8) as response:
+                    result = json.loads(response.read().decode())
+                for command in result.get("commands", []):
+                    queue_command(command)
+            except Exception as exc:
+                print(f"Relay poll failed: {exc}")
+                time.sleep(2)
+        else:
+            time.sleep(1)
 
 class Handler(BaseHTTPRequestHandler):
     def _headers(self, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Origin", "http://localhost")
         self.end_headers()
-
-    def do_OPTIONS(self):
-        self._headers(204)
 
     def do_GET(self):
         if self.path == "/":
             self._headers()
-            self.wfile.write(json.dumps({
-                "app":"CinePulse Controller","status":"running","port":PORT,"transport":"HTTP/TCP"
-            }).encode())
+            self.wfile.write(json.dumps({"app":"CinePulse Controller","status":"running","transport":"cloud relay"}).encode())
             return
         if self.path == "/ping":
             self._headers()
-            self.wfile.write(b'{"ok":true,"app":"CinePulse Controller"}')
+            self.wfile.write(json.dumps({"ok":True,"app":"CinePulse Controller","relay":bool(RELAY_TOKEN)}).encode())
             return
         if self.path == "/commands":
             with lock:
@@ -79,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(self.rfile.read(length).decode() or "{}")
             command = payload.get("command")
-            if command not in {"play","pause","rewind","forward"}:
+            if command not in VALID:
                 raise ValueError("unsupported command")
             queue_command(command)
             self._headers()
@@ -92,8 +104,10 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
-    threading.Thread(target=udp_server, daemon=True).start()
+    register_controller()
+    threading.Thread(target=relay_poll_loop, daemon=True).start()
     print("CinePulse Controller")
-    print("Listening on http://0.0.0.0:8765")
+    print("Local Chrome bridge: http://127.0.0.1:8765")
+    print("Cloud relay: outbound HTTPS polling")
     print("Keep this window open while CinePulse is controlling Chrome.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
