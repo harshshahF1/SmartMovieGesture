@@ -93,8 +93,28 @@ private suspend fun discoverLaptop(): String? = withContext(Dispatchers.IO) {
     }.getOrNull()
 }
 
-private suspend fun laptopRequest(host: String, command: String? = null): Boolean {
-    return if (command == null) udpRequest(host, "CINEPULSE_PING") else udpRequest(host, command)
+private suspend fun laptopRequest(host: String, command: String? = null): Boolean = withContext(Dispatchers.IO) {
+    runCatching {
+        val url = if (command == null) "http://$host:8765/ping" else "http://$host:8765/command"
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = if (command == null) "GET" else "POST"
+            connectTimeout = 1800
+            readTimeout = 1800
+            useCaches = false
+            doInput = true
+            if (command != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+            }
+        }
+        connection.use {
+            if (command != null) {
+                val body = JSONObject().put("command", command).toString()
+                it.outputStream.use { out -> out.write(body.toByteArray(Charsets.UTF_8)) }
+            }
+            it.responseCode in 200..299
+        }
+    }.getOrDefault(false)
 }
 
 @Composable
