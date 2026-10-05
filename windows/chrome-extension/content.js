@@ -1,21 +1,26 @@
-const SERVER = "http://127.0.0.1:8765/commands";
+function applyCommands(commands) {
+  const video = document.querySelector("video");
+  if (!video) return;
 
-async function poll() {
-  try {
-    const response = await fetch(SERVER, { cache: "no-store" });
-    if (!response.ok) return;
-    const data = await response.json();
-    const video = document.querySelector("video");
-    if (!video) return;
-
-    for (const command of data.commands || []) {
-      if (command === "play") video.play().catch(() => {});
-      if (command === "pause") video.pause();
-      if (command === "rewind") video.currentTime = Math.max(0, video.currentTime - 5);
-      if (command === "forward") video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 5);
+  for (const command of commands || []) {
+    if (command === "play") video.play().catch(() => {});
+    if (command === "pause") video.pause();
+    if (command === "rewind") video.currentTime = Math.max(0, video.currentTime - 5);
+    if (command === "forward") {
+      video.currentTime = Math.min(
+        Number.isFinite(video.duration) ? video.duration : Infinity,
+        video.currentTime + 5
+      );
     }
-  } catch (_) {}
+  }
 }
 
-setInterval(poll, 250);
-poll();
+function pollController() {
+  chrome.runtime.sendMessage({ type: "poll_commands" }, (response) => {
+    if (chrome.runtime.lastError) return;
+    if (response?.ok) applyCommands(response.commands);
+  });
+}
+
+setInterval(pollController, 250);
+pollController();
