@@ -361,7 +361,7 @@ private fun CameraAnalyzer(
                     }
                     val timestamp = SystemClock.uptimeMillis()
                     val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees)
-                    detector.process(input).addOnSuccessListener { onFaces(it) }
+                    detector.process(input).addOnSuccessListener { onFaces(it) }.addOnCompleteListener { if (gestureRecognizer == null) proxy.close() }
 
                     if (gestureRecognizer != null) {
                         runCatching {
@@ -410,7 +410,7 @@ private fun CameraAnalyzer(
                             onGestureStatus("Hand gesture processing unavailable")
                         }
                     }
-                    proxy.close()
+                    if (gestureRecognizer != null) proxy.close()
                 }
                 provider.unbindAll()
                 provider.bindToLifecycle(context as androidx.lifecycle.LifecycleOwner, androidx.camera.core.CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
