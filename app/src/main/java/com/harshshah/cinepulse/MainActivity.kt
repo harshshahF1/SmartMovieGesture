@@ -3,6 +3,7 @@ package com.harshshah.cinepulse
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -36,6 +37,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 
 private val Background = Color(0xFF07080B)
 private val SurfaceDark = Color(0xFF11141A)
@@ -51,23 +55,40 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private suspend fun laptopRequest(host: String, command: String? = null): Boolean = withContext(Dispatchers.IO) {
+private const val UDP_PORT = 8766
+private const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
+
+private suspend fun udpRequest(host: String, message: String): Boolean = withContext(Dispatchers.IO) {
     runCatching {
-        val path = if (command == null) "/" else "/command"
-        val c = (URL("http://$host:8765$path").openConnection() as HttpURLConnection).apply {
-            requestMethod = if (command == null) "GET" else "POST"
-            connectTimeout = 1500
-            readTimeout = 1500
-            if (command != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-            }
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 1500
+            val bytes = message.toByteArray(Charsets.UTF_8)
+            socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(host), UDP_PORT))
+            val buffer = ByteArray(256)
+            val reply = DatagramPacket(buffer, buffer.size)
+            socket.receive(reply)
+            String(reply.data, 0, reply.length, Charsets.UTF_8).startsWith("CINEPULSE")
         }
-        if (command != null) c.outputStream.use { it.write(JSONObject().put("command", command).toString().toByteArray()) }
-        val ok = c.responseCode in 200..299
-        c.disconnect()
-        ok
     }.getOrDefault(false)
+}
+
+private suspend fun discoverLaptop(): String? = withContext(Dispatchers.IO) {
+    runCatching {
+        DatagramSocket().use { socket ->
+            socket.broadcast = true
+            socket.soTimeout = 1800
+            val bytes = "CINEPULSE_DISCOVER".toByteArray(Charsets.UTF_8)
+            socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), UDP_PORT))
+            val buffer = ByteArray(512)
+            val reply = DatagramPacket(buffer, buffer.size)
+            socket.receive(reply)
+            if (String(reply.data, 0, reply.length, Charsets.UTF_8).startsWith("CINEPULSE|")) reply.address.hostAddress else null
+        }
+    }.getOrNull()
+}
+
+private suspend fun laptopRequest(host: String, command: String? = null): Boolean {
+    return if (command == null) udpRequest(host, "CINEPULSE_PING") else udpRequest(host, command)
 }
 
 @Composable
@@ -108,18 +129,44 @@ private fun HomeScreen() {
     var laptopIp by remember { mutableStateOf("") }
     var connected by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Connect your Windows laptop") }
-    var connectTick by remember { mutableIntStateOf(0) }
+    var connectTick by remember { mutableIntStateOf(0) }\n    var discoverTick by remember { mutableIntStateOf(0) }\n    var localNetworkGranted by remember { mutableStateOf(Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(context, LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED) }
     var sleepStarted by remember { mutableLongStateOf(0L) }
     var lastPresence by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastCommand by remember { mutableStateOf("") }
+
+    val localNetworkPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        localNetworkGranted = it
+        if (!it) status = "Local network permission is required for laptop control"
+    }
 
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraGranted = it
         status = if (it) "Camera monitoring enabled" else "Camera permission is required"
     }
 
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION)
+    }
+
+    LaunchedEffect(discoverTick) {
+        if (discoverTick > 0) {
+            if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) {
+                status = "Allow Local network access first"
+                localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION)
+            } else {
+                status = "Searching for CinePulse Controller…"
+                val found = discoverLaptop()
+                if (found != null) {
+                    laptopIp = found
+                    connected = laptopRequest(found)
+                    status = if (connected) "Laptop found • YouTube control ready" else "Laptop found but connection failed"
+                } else status = "Laptop not found • check same Wi-Fi and controller"
+            }
+        }
+    }
+
     LaunchedEffect(connectTick) {
-        if (connectTick > 0 && laptopIp.isNotBlank()) {
+        if (connectTick > 0 && laptopIp.isNotBlank()) {\n            if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) { status = "Allow Local network access first"; localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION); return@LaunchedEffect }
             status = "Connecting…"
             connected = laptopRequest(laptopIp.trim())
             status = if (connected) "Connected • YouTube control ready" else "Could not connect • check IP, Wi-Fi and controller"
@@ -186,11 +233,11 @@ private fun HomeScreen() {
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Windows + Chrome", color = TextPrimary, fontWeight = FontWeight.Bold)
-                        Text(if (connected) "Connected • YouTube control ready" else "Same Wi-Fi • enter laptop IP", color = TextSecondary, fontSize = 11.sp)
+                        Text(if (connected) "Connected • YouTube control ready" else "Same Wi-Fi • auto-discover or enter laptop IP", color = TextSecondary, fontSize = 11.sp)
                     }
                     Box(Modifier.size(9.dp).clip(CircleShape).background(if (connected) Cyan else Color(0xFF5A6472)))
                 }
-                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Laptop IPv4 address") }, placeholder = { Text("Example: 192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
+                Button(onClick = { discoverTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B1F27), contentColor = TextPrimary)) {\n                    Icon(Icons.Rounded.WifiFind, null)\n                    Spacer(Modifier.width(8.dp))\n                    Text("Auto-discover laptop", fontWeight = FontWeight.Bold)\n                }\n                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Laptop IPv4 address") }, placeholder = { Text("Example: 192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
                 Button(onClick = { connectTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)) {
                     Icon(if (connected) Icons.Rounded.Link else Icons.Rounded.LinkOff, null)
                     Spacer(Modifier.width(8.dp))
