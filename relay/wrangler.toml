@@ -1,0 +1,12 @@
+name = "cinepulse-relay"
+main = "worker.js"
+compatibility_date = "2026-10-05"
+
+[durable_objects]
+bindings = [
+  { name = "CINEPULSE_SESSIONS", class_name = "CinePulseSession" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CinePulseSession"]
