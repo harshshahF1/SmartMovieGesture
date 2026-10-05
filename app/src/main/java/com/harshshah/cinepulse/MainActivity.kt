@@ -2,6 +2,10 @@ package com.harshshah.cinepulse
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.os.Build
 import android.os.SystemClock
@@ -62,27 +66,21 @@ class MainActivity : ComponentActivity() {
 }
 
 private const val UDP_PORT = 8766
-private const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
 
-private suspend fun udpRequest(host: String, message: String): Boolean = withContext(Dispatchers.IO) {
-    runCatching {
-        DatagramSocket().use { socket ->
-            socket.soTimeout = 1500
-            val bytes = message.toByteArray(Charsets.UTF_8)
-            socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(host), UDP_PORT))
-            val buffer = ByteArray(256)
-            val reply = DatagramPacket(buffer, buffer.size)
-            socket.receive(reply)
-            String(reply.data, 0, reply.length, Charsets.UTF_8).startsWith("CINEPULSE")
-        }
-    }.getOrDefault(false)
+private fun bluetoothNetwork(context: Context): Network? {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    return cm.allNetworks.firstOrNull { network ->
+        cm.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) == true
+    }
 }
 
-private suspend fun discoverLaptop(): String? = withContext(Dispatchers.IO) {
+private suspend fun discoverLaptop(context: Context): String? = withContext(Dispatchers.IO) {
     runCatching {
+        val network = bluetoothNetwork(context) ?: return@withContext null
         DatagramSocket().use { socket ->
+            network.bindSocket(socket)
             socket.broadcast = true
-            socket.soTimeout = 1800
+            socket.soTimeout = 2500
             val bytes = "CINEPULSE_DISCOVER".toByteArray(Charsets.UTF_8)
             socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), UDP_PORT))
             val buffer = ByteArray(512)
@@ -93,13 +91,14 @@ private suspend fun discoverLaptop(): String? = withContext(Dispatchers.IO) {
     }.getOrNull()
 }
 
-private suspend fun laptopRequest(host: String, command: String? = null): Boolean = withContext(Dispatchers.IO) {
+private suspend fun laptopRequest(context: Context, host: String, command: String? = null): Boolean = withContext(Dispatchers.IO) {
     runCatching {
+        val network = bluetoothNetwork(context) ?: return@withContext false
         val url = if (command == null) "http://$host:8765/ping" else "http://$host:8765/command"
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+        val connection = (network.openConnection(URL(url)) as HttpURLConnection).apply {
             requestMethod = if (command == null) "GET" else "POST"
-            connectTimeout = 1800
-            readTimeout = 1800
+            connectTimeout = 2500
+            readTimeout = 2500
             useCaches = false
             doInput = true
             if (command != null) {
@@ -159,49 +158,33 @@ private fun HomeScreen() {
     var status by remember { mutableStateOf("Connect your Windows laptop") }
     var connectTick by remember { mutableIntStateOf(0) }
     var discoverTick by remember { mutableIntStateOf(0) }
-    var localNetworkGranted by remember { mutableStateOf(Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(context, LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED) }
     var sleepStarted by remember { mutableLongStateOf(0L) }
     var lastPresence by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastCommand by remember { mutableStateOf("") }
     var gestureStatus by remember { mutableStateOf("Hand gestures ready") }
-
-    val localNetworkPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        localNetworkGranted = it
-        if (!it) status = "Local network permission is required for laptop control"
-    }
 
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraGranted = it
         status = if (it) "Camera monitoring enabled" else "Camera permission is required"
     }
 
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION)
-    }
-
     LaunchedEffect(discoverTick) {
         if (discoverTick > 0) {
-            if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) {
-                status = "Allow Local network access first"
-                localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION)
-            } else {
-                status = "Searching for CinePulse Controller…"
-                val found = discoverLaptop()
-                if (found != null) {
-                    laptopIp = found
-                    connected = laptopRequest(found)
-                    status = if (connected) "Laptop found • YouTube control ready" else "Laptop found but connection failed"
-                } else status = "Laptop not found • check same Wi-Fi and controller"
-            }
+            status = "Searching over Bluetooth…"
+            val found = discoverLaptop(context)
+            if (found != null) {
+                laptopIp = found
+                connected = laptopRequest(context, found)
+                status = if (connected) "Laptop found • Bluetooth control ready" else "Laptop found but connection failed"
+            } else status = "Bluetooth network not found • enable Bluetooth tethering and connect Windows"
         }
     }
 
     LaunchedEffect(connectTick) {
         if (connectTick > 0 && laptopIp.isNotBlank()) {
-            if (Build.VERSION.SDK_INT >= 37 && !localNetworkGranted) { status = "Allow Local network access first"; localNetworkPermission.launch(LOCAL_NETWORK_PERMISSION); return@LaunchedEffect }
-            status = "Connecting…"
-            connected = laptopRequest(laptopIp.trim())
-            status = if (connected) "Connected • YouTube control ready" else "Could not connect • check IP, Wi-Fi and controller"
+            status = "Connecting over Bluetooth…"
+            connected = laptopRequest(context, laptopIp.trim())
+            status = if (connected) "Connected • Bluetooth control ready" else "Could not connect • check Bluetooth PAN and controller"
         }
     }
 
@@ -210,7 +193,7 @@ private fun HomeScreen() {
             status = "Connect the Windows laptop first"
             return
         }
-        if (laptopRequest(laptopIp.trim(), value)) {
+        if (laptopRequest(context, laptopIp.trim(), value)) {
             lastCommand = value
             status = when (value) {
                 "rewind" -> "Rewound 5 seconds"
@@ -265,16 +248,16 @@ private fun HomeScreen() {
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Windows + Chrome", color = TextPrimary, fontWeight = FontWeight.Bold)
-                        Text(if (connected) "Connected • YouTube control ready" else "Same Wi-Fi • auto-discover or enter laptop IP", color = TextSecondary, fontSize = 11.sp)
+                        Text(if (connected) "Connected • YouTube control ready" else "Bluetooth PAN • auto-discover or enter laptop IP", color = TextSecondary, fontSize = 11.sp)
                     }
                     Box(Modifier.size(9.dp).clip(CircleShape).background(if (connected) Cyan else Color(0xFF5A6472)))
                 }
                 Button(onClick = { discoverTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B1F27), contentColor = TextPrimary)) {
                     Icon(Icons.Rounded.WifiFind, null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Auto-discover laptop", fontWeight = FontWeight.Bold)
+                    Text("Find laptop over Bluetooth", fontWeight = FontWeight.Bold)
                 }
-                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Laptop IPv4 address") }, placeholder = { Text("Example: 192.168.1.20") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
+                OutlinedTextField(value = laptopIp, onValueChange = { laptopIp = it; connected = false }, label = { Text("Bluetooth PAN laptop IP (optional)") }, placeholder = { Text("Example: 192.168.44.2") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Accent, focusedLabelColor = Accent))
                 Button(onClick = { connectTick++ }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)) {
                     Icon(if (connected) Icons.Rounded.Link else Icons.Rounded.LinkOff, null)
                     Spacer(Modifier.width(8.dp))
@@ -313,6 +296,8 @@ private fun HomeScreen() {
                     Text(if (monitoring) "Monitoring active" else "Start camera monitoring")
                 }
                 if (monitoring && cameraGranted) CameraAnalyzer(onFaces = { faces = it }, onGestureCommand = { value -> scope.launch { command(value) } }, onGestureStatus = { gestureStatus = it })
+                Text("Bluetooth connection", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text("Pair the phone with Windows, enable Bluetooth tethering on the phone, connect Windows to the phone's Bluetooth Personal Area Network, then tap Find laptop over Bluetooth.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
                 Text("Smart attention", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Text("No viewer for 2.5s → pause. Everyone's eyes closed for 10s → pause. When attention returns → play.", color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
                 Text("Camera analysis stays on-device • no camera frames are sent to the laptop", color = Color(0xFF7F8A9A), fontSize = 11.sp)
