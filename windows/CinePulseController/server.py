@@ -25,10 +25,7 @@ def queue_command(command):
 
 def _request_json(url, method="GET", body=None):
     data = json.dumps(body).encode() if body is not None else None
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": USER_AGENT,
-    }
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
@@ -40,11 +37,8 @@ def register_controller():
         print("Cloud relay not configured. Set the relay URL and pairing code.")
         return False
     try:
-        with _request_json(
-            RELAY_URL + "/v1/register",
-            "POST",
-            {"code": PAIRING_CODE, "role": "controller"}
-        ) as response:
+        with _request_json(RELAY_URL + "/v1/register", "POST",
+                           {"code": PAIRING_CODE, "role": "controller"}) as response:
             result = json.loads(response.read().decode())
         RELAY_TOKEN = result.get("token")
         if RELAY_TOKEN:
@@ -59,20 +53,14 @@ def register_controller():
     return False
 
 def _poll_once():
-    # POST is the current protocol. GET is kept as a compatibility fallback
-    # for the already-deployed older Worker, so a ZIP-only update can still work.
     try:
-        with _request_json(
-            RELAY_URL + "/v1/poll",
-            "POST",
-            {"code": PAIRING_CODE, "token": RELAY_TOKEN}
-        ) as response:
+        with _request_json(RELAY_URL + "/v1/poll", "POST",
+                           {"code": PAIRING_CODE, "token": RELAY_TOKEN}) as response:
             return json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         if exc.code not in (403, 404, 405):
             detail = exc.read().decode(errors="replace")
             raise RuntimeError(f"HTTP {exc.code} {detail}")
-        # Older deployed Worker: GET /v1/poll?code=...&token=...
         query = urllib.parse.urlencode({"code": PAIRING_CODE, "token": RELAY_TOKEN})
         with _request_json(RELAY_URL + "/v1/poll?" + query, "GET") as response:
             return json.loads(response.read().decode())
@@ -105,9 +93,18 @@ def relay_poll_loop():
 class Handler(BaseHTTPRequestHandler):
     def _headers(self, status=200):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "http://localhost")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        # The Chrome content script runs on youtube.com, so localhost-only
+        # CORS prevents it from reading /commands. The endpoint contains only
+        # playback commands, not camera, audio, video, or relay credentials.
+        self.send_header("Access-Control-Allow-Origin", "https://www.youtube.com")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def do_OPTIONS(self):
+        self._headers(204)
 
     def do_GET(self):
         if self.path == "/":
