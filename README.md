@@ -51,3 +51,6 @@ GitHub Actions builds the Android debug APK on pushes to `main`.
 ## Stack
 
 Kotlin, Jetpack Compose Material 3, CameraX, Google ML Kit Face Detection, AndroidX Media3 dependencies, Python standard-library HTTP server, and a Chrome Manifest V3 extension.
+
+
+Build verification trigger: Gradle 9.1 / CinePulse APK
