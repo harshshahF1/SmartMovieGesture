@@ -14,6 +14,7 @@ RELAY_TOKEN = None
 commands = []
 lock = threading.Lock()
 VALID = {"play", "pause", "rewind", "forward"}
+USER_AGENT = "CinePulseController/1.0 (Windows; HTTPS Relay)"
 
 def queue_command(command):
     if command in VALID:
@@ -22,36 +23,81 @@ def queue_command(command):
         return True
     return False
 
+def _request_json(url, method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    return urllib.request.urlopen(req, timeout=8)
+
 def register_controller():
     global RELAY_TOKEN
     if not RELAY_URL.startswith("https://") or not PAIRING_CODE:
         print("Cloud relay not configured. Set the relay URL and pairing code.")
         return False
     try:
-        body = json.dumps({"code": PAIRING_CODE, "role": "controller"}).encode()
-        req = urllib.request.Request(RELAY_URL + "/v1/register", data=body, method="POST", headers={"Content-Type":"application/json","Accept":"application/json"})
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with _request_json(
+            RELAY_URL + "/v1/register",
+            "POST",
+            {"code": PAIRING_CODE, "role": "controller"}
+        ) as response:
             result = json.loads(response.read().decode())
         RELAY_TOKEN = result.get("token")
         if RELAY_TOKEN:
             print("Cloud relay connected. Only playback commands are relayed.")
             return True
+        print("Relay registration returned no controller token.")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        print(f"Relay registration failed: HTTP {exc.code} {detail}")
     except Exception as exc:
         print(f"Relay registration failed: {exc}")
     return False
 
+def _poll_once():
+    # POST is the current protocol. GET is kept as a compatibility fallback
+    # for the already-deployed older Worker, so a ZIP-only update can still work.
+    try:
+        with _request_json(
+            RELAY_URL + "/v1/poll",
+            "POST",
+            {"code": PAIRING_CODE, "token": RELAY_TOKEN}
+        ) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (403, 404, 405):
+            detail = exc.read().decode(errors="replace")
+            raise RuntimeError(f"HTTP {exc.code} {detail}")
+        # Older deployed Worker: GET /v1/poll?code=...&token=...
+        query = urllib.parse.urlencode({"code": PAIRING_CODE, "token": RELAY_TOKEN})
+        with _request_json(RELAY_URL + "/v1/poll?" + query, "GET") as response:
+            return json.loads(response.read().decode())
+
 def relay_poll_loop():
+    last_error = None
     while True:
         if RELAY_TOKEN:
             try:
-                body = json.dumps({"code": PAIRING_CODE, "token": RELAY_TOKEN}).encode()
-                req = urllib.request.Request(RELAY_URL + "/v1/poll", data=body, method="POST", headers={"Content-Type":"application/json","Accept":"application/json"})
-                with urllib.request.urlopen(req, timeout=8) as response:
-                    result = json.loads(response.read().decode())
+                result = _poll_once()
+                last_error = None
                 for command in result.get("commands", []):
                     queue_command(command)
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode(errors="replace")
+                message = f"HTTP {exc.code} {detail}".strip()
+                if message != last_error:
+                    print(f"Relay poll failed: {message}")
+                    last_error = message
+                time.sleep(2)
             except Exception as exc:
-                print(f"Relay poll failed: {exc}")
+                message = str(exc)
+                if message != last_error:
+                    print(f"Relay poll failed: {message}")
+                    last_error = message
                 time.sleep(2)
         else:
             time.sleep(1)
