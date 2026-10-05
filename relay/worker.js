@@ -100,6 +100,20 @@ export default {
       });
     }
 
+    // Backward compatibility with older controller builds.
+    if (url.pathname === "/v1/poll" && request.method === "GET") {
+      const code = (url.searchParams.get("code") || "").toUpperCase();
+      const token = url.searchParams.get("token") || "";
+      if (!code || !token) return json({ error: "missing credentials" }, 400);
+      const id = env.CINEPULSE_SESSIONS.idFromName(code);
+      const stub = env.CINEPULSE_SESSIONS.get(id);
+      return stub.fetch("https://relay/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code, token })
+      });
+    }
+
     return json({ error: "not found" }, 404);
   }
 };
