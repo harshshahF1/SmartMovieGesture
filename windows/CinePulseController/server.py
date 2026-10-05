@@ -1,11 +1,41 @@
 import json
 import threading
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOST = "0.0.0.0"
 PORT = 8765
+UDP_PORT = 8766
 commands = []
 lock = threading.Lock()
+
+def queue_command(command):
+    if command in {"play", "pause", "rewind", "forward"}:
+        with lock:
+            commands.append(command)
+        return True
+    return False
+
+def udp_server():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((HOST, UDP_PORT))
+    print(f"UDP control/discovery on 0.0.0.0:{UDP_PORT}")
+    while True:
+        try:
+            data, addr = sock.recvfrom(2048)
+            message = data.decode("utf-8", errors="ignore").strip()
+            if message == "CINEPULSE_DISCOVER":
+                reply = f"CINEPULSE|{socket.gethostname()}|{addr[0]}".encode()
+                sock.sendto(reply, addr)
+            elif message == "CINEPULSE_PING":
+                sock.sendto(b"CINEPULSE_OK", addr)
+            elif queue_command(message):
+                sock.sendto(b"CINEPULSE_OK", addr)
+            else:
+                sock.sendto(b"CINEPULSE_ERROR", addr)
+        except Exception as exc:
+            print(f"UDP error: {exc}")
 
 class Handler(BaseHTTPRequestHandler):
     def _headers(self, status=200):
@@ -47,8 +77,7 @@ class Handler(BaseHTTPRequestHandler):
             command = payload.get("command")
             if command not in {"play","pause","rewind","forward"}:
                 raise ValueError("unsupported command")
-            with lock:
-                commands.append(command)
+            queue_command(command)
             self._headers()
             self.wfile.write(json.dumps({"ok":True,"command":command}).encode())
         except Exception as exc:
@@ -59,6 +88,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
+    threading.Thread(target=udp_server, daemon=True).start()
     print("CinePulse Controller")
     print("Listening on http://0.0.0.0:8765")
     print("Keep this window open while CinePulse is controlling Chrome.")
