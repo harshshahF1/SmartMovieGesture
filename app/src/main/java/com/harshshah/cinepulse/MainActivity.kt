@@ -107,12 +107,14 @@ private suspend fun laptopRequest(host: String, command: String? = null): Boolea
                 setRequestProperty("Content-Type", "application/json")
             }
         }
-        connection.use {
+        try {
             if (command != null) {
                 val body = JSONObject().put("command", command).toString()
-                it.outputStream.use { out -> out.write(body.toByteArray(Charsets.UTF_8)) }
+                connection.outputStream.use { out -> out.write(body.toByteArray(Charsets.UTF_8)) }
             }
-            it.responseCode in 200..299
+            connection.responseCode in 200..299
+        } finally {
+            connection.disconnect()
         }
     }.getOrDefault(false)
 }
