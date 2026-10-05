@@ -53,8 +53,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/":
             self._headers()
             self.wfile.write(json.dumps({
-                "app":"CinePulse Controller","status":"running","port":PORT
+                "app":"CinePulse Controller","status":"running","port":PORT,"transport":"HTTP/TCP"
             }).encode())
+            return
+        if self.path == "/ping":
+            self._headers()
+            self.wfile.write(b'{"ok":true,"app":"CinePulse Controller"}')
             return
         if self.path == "/commands":
             with lock:
